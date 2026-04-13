@@ -149,3 +149,21 @@ CREATE TABLE queue_offer (
         ON DELETE CASCADE
         ON UPDATE CASCADE
 );
+
+CREATE INDEX idx_time_slot_status_start_time
+    ON time_slot(status, start_time);
+
+CREATE INDEX idx_time_slot_salon_start_time
+    ON time_slot(salon_id, start_time);
+
+CREATE INDEX idx_time_slot_hairdresser_start_time
+    ON time_slot(hairdresser_id, start_time);
+
+CREATE INDEX idx_time_slot_start_time_end_time
+    ON time_slot(start_time, end_time);
+
+CREATE INDEX idx_appointment_client_id
+    ON appointment(client_id);
+
+CREATE INDEX idx_waiting_queue_slot_id
+    ON waiting_queue(slot_id);
