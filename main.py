@@ -80,19 +80,18 @@ def get_slots(
     hairdresser_id: int | None = Query(default=None, gt=0),
     slot_status: str | None = Query(default=None, alias="status"),
     page: int = Query(default=1, ge=1),
-    limit: int = Query(default=50, ge=1, le=200),
+    limit: int = Query(default=30, ge=1, le=200),
 ):
     if date_from and date_to and date_from > date_to:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="date_from nie może być późniejszy niż date_to.")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="date_from nie może być późniejszy niż date_to."
+        )
 
-    where_clause, parameters = _build_slot_filters(date_from, date_to, salon_id, hairdresser_id, slot_status)
+    where_clause, parameters = _build_slot_filters(
+        date_from, date_to, salon_id, hairdresser_id, slot_status
+    )
     offset = (page - 1) * limit
-
-    count_query = f"""
-        SELECT COUNT(*) AS total
-        FROM time_slot ts
-        WHERE {where_clause}
-    """
 
     data_query = f"""
         SELECT
@@ -114,16 +113,17 @@ def get_slots(
     """
 
     with connection_cursor(dictionary=True) as (_, cursor):
-        cursor.execute(count_query, parameters)
-        total = cursor.fetchone()["total"]
+        cursor.execute(data_query, parameters + [limit + 1, offset])
+        rows = cursor.fetchall()
 
-        cursor.execute(data_query, parameters + [limit, offset])
-        slots = cursor.fetchall()
+    has_next = len(rows) > limit
+    slots = rows[:limit]
 
     return {
-        "total": total,
         "page": page,
         "limit": limit,
+        "returned": len(slots),
+        "has_next": has_next,
         "slots": slots,
     }
 
