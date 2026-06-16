@@ -1,0 +1,264 @@
+﻿\documentclass[a4paper,11pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[polish]{babel}
+\usepackage{geometry}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+\geometry{margin=2.5cm}
+\lstset{
+  basicstyle=\ttfamily\footnotesize,
+  backgroundcolor=\color{gray!5},
+  frame=single,
+  breaklines=true,
+  keywordstyle=\color{blue},
+  commentstyle=\color{gray},
+  showstringspaces=false,
+  numbers=left,
+  numberstyle=\tiny,
+  xleftmargin=2em,
+  framexleftmargin=1.5em,
+}
+\begin{document}
+\title{Raport optymalizacji systemu rezerwacji salonu}
+\author{System rezerwacji \texttt{FastAPI + MySQL}}
+\date{16 czerwca 2026}
+\maketitle
+\section{Cel}
+Celem raportu jest przedstawienie kolejnych etapów optymalizacji zapytania i architektury systemu rezerwacji fryzjerskiej na podstawie wykonanych testów wydajnościowych. W raporcie opisano trzy etapy: usunięcie zliczania rekordów, analizę planu zapytania z EXPLAIN i wymuszenie kolejności JOIN, oraz rozdzielenie odczytów i zapisów na dwie bazy MySQL.
+
+\section{Środowisko testowe}
+System został zbudowany jako aplikacja FastAPI z bazą MySQL uruchamianą w Dockerze. W projekcie znajdują się następujące elementy:
+\begin{itemize}
+  \item \texttt{main.py} \textendash FastAPI + logika endpointów,
+  \item \texttt{db.py} \textendash zarządzanie pulami połączeń MySQL,
+  \item \texttt{docker-compose.yml} \textendash usługi \texttt{db\_primary}, \texttt{db\_replica} i \texttt{app}.
+\end{itemize}
+Do testów użyto JMetera i czterech iteracji obciążenia danymi z próbami od 10 do 250 użytkowników.
+
+\section{Etap 1: usunięcie zliczania rekordów}
+Pierwsza poprawka polegała na usunięciu dodatkowego zapytania, które wykorzystywało \texttt{COUNT(*)}. To zliczanie było niepotrzebne dla paginacji i powodowało dodatkowy koszt na dużym zbiorze danych.
+
+W kodzie miał miejsce fragment:
+\begin{lstlisting}[language=python]
+offset = (page - 1) * limit
+\end{lstlisting}
+
+Zamiast dodatkowego \texttt{COUNT(*)} pobieraliśmy dane bezpośrednio z \texttt{LIMIT} i \texttt{OFFSET}.
+
+Dzięki temu zredukowano liczbę operacji agregacji i poprawiono wydajność odczytu. Ta zmiana znalazła się w zestawieniu \texttt{summary\_po\_zmianie.csv}.
+
+\section{Etap 2: analiza EXPLAIN i wymuszenie kolejności JOIN}
+Kolejny etap to analiza planu wykonania zapytania przy użyciu instrukcji \texttt{EXPLAIN SELECT}. Plan wykazał niekorzystny przebieg zapytania, gdzie MySQL skanował tabelę \texttt{salon} zamiast wykorzystywać indeksy po stronie tabeli \texttt{time\_slot}.
+
+Aby wymusić lepszy plan, zastosowano \lstinline{STRAIGHT_JOIN}, który każe silnikowi MySQL łączyć tabele w zadanej kolejności. W \texttt{main.py} zmieniono konstrukcje JOIN ze standardowych na:
+\begin{lstlisting}[language=SQL]
+FROM time_slot ts
+STRAIGHT_JOIN salon ON salon.salon_id = ts.salon_id
+STRAIGHT_JOIN hairdresser ON hairdresser.hairdresser_id = ts.hairdresser_id
+\end{lstlisting}
+
+Po tej zmianie pojawił się wynik z \texttt{summary\_po\_explain.csv}, gdzie widoczna jest przyrostowa poprawa w próbach 100 i wyższych, przy zachowaniu niskiego odsetka błędów.
+
+\section{Etap 3: rozdzielenie baz na primary/replika}
+Ostatni etap to przebudowa infrastruktury na dwie bazy MySQL: \texttt{db\_primary} dla zapisów i \texttt{db\_replica} dla odczytów.
+Konfiguracja w \texttt{docker-compose.yml} obejmuje:
+\begin{itemize}
+  \item \texttt{db\_primary}: port 3307, binlog, server-id=1,
+  \item \texttt{db\_replica}: port 3308, read-only, relay log, server-id=2,
+  \item \texttt{app}: zmienne \texttt{DB\_WRITE\_HOST=db\_primary} i \texttt{DB\_READ\_HOST=db\_replica}.
+\end{itemize}
+
+Kod read/write split w \texttt{db.py}:
+\begin{lstlisting}[language=Python]
+DB_WRITE_HOST = os.getenv("DB_WRITE_HOST", "127.0.0.1")
+DB_WRITE_PORT = int(os.getenv("DB_WRITE_PORT", 3307))
+DB_READ_HOST = os.getenv("DB_READ_HOST", "127.0.0.1")
+DB_READ_PORT = int(os.getenv("DB_READ_PORT", 3308))
+\end{lstlisting}
+
+Dzięki takiej separacji odczyty mogły być obsługiwane przez replikę bez obciążania bazy zapisu.
+
+\section{Wyniki}
+Poniżej przedstawione są średnie czasy odpowiedzi dla kolejnych serii testów.
+
+\begin{table}[ht]
+\centering
+\caption{Porównanie czasów \texttt{Average} dla eksperymentów}
+\label{tab:wyniki}
+\begin{tabular}{@{}rrrrr@{}}
+\toprule
+Label & Przed zmianą & Po zmianie & Po EXPLAIN & Dwie bazy \\
+\midrule
+10 & 11 & 9 & 10 & 9 \\
+25 & 10 & 8 & 9 & 7 \\
+50 & 13 & 9 & 9 & 8 \\
+75 & 24 & 13 & 13 & 9 \\
+100 & 110 & 77 & 42 & 15 \\
+125 & 181 & 122 & 114 & 38 \\
+150 & 260 & 214 & 195 & 111 \\
+175 & 342 & 287 & 270 & 168 \\
+200 & 446 & 366 & 357 & 227 \\
+225 & 527 & 424 & 428 & 311 \\
+250 & 626 & 501 & 470 & 355 \\
+\midrule
+TOTAL & 361 & 290 & 276 & 186 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+    width=\textwidth,
+    height=9cm,
+    grid=major,
+    xlabel={Liczba próbek (Label)},
+    ylabel={Średni czas odpowiedzi [ms]},
+    legend pos=north west,
+    ymin=0,
+    ymax=700,
+    xtick={10,25,50,75,100,125,150,175,200,225,250},
+    x tick label style={rotate=45,anchor=east},
+]
+\addplot+[mark=*,blue] table [col sep=comma, x=Label, y=Average] {
+Label,Average
+10,11
+25,10
+50,13
+75,24
+100,110
+125,181
+150,260
+175,342
+200,446
+225,527
+250,626
+};
+\addlegendentry{Przed zmianą}
+\addplot+[mark=triangle*,red] table [col sep=comma, x=Label, y=Average] {
+Label,Average
+10,9
+25,8
+50,9
+75,13
+100,77
+125,122
+150,214
+175,287
+200,366
+225,424
+250,501
+};
+\addlegendentry{Po usunięciu count}
+\addplot+[mark=square*,orange] table [col sep=comma, x=Label, y=Average] {
+Label,Average
+10,10
+25,9
+50,9
+75,13
+100,42
+125,114
+150,195
+175,270
+200,357
+225,428
+250,470
+};
+\addlegendentry{Po EXPLAIN / STRAIGHT\_JOIN}
+\addplot+[mark=pentagon*,teal] table [col sep=comma, x=Label, y=Average] {
+Label,Average
+10,9
+25,7
+50,8
+75,9
+100,15
+125,38
+150,111
+175,168
+200,227
+225,311
+250,355
+};
+\addlegendentry{Dwie bazy}
+\end{axis}
+\end{tikzpicture}
+\caption{Porównanie średnich czasów odpowiedzi dla czterech etapów optymalizacji.}
+\end{figure}
+
+\begin{figure}[ht]
+\centering
+\begin{tikzpicture}
+\begin{axis}[
+    width=100mm,
+    height=100mm,
+    grid=major,
+    xlabel={Liczba próbek (Label)},
+    ylabel={Średni czas odpowiedzi [ms]},
+    legend pos=north west,
+    ymin=0,
+    ymax=30,
+    xmin=10,
+    xmax=100,
+    xtick={10,25,50,75,100},
+    x tick label style={rotate=45,anchor=east},
+]
+\addplot+[mark=*,blue] table [col sep=comma, x=Label, y=Average] {
+Label,Average
+10,11
+25,10
+50,13
+75,24
+100,110
+};
+\addlegendentry{Przed zmianą}
+\addplot+[mark=triangle*,red] table [col sep=comma, x=Label, y=Average] {
+Label,Average
+10,9
+25,8
+50,9
+75,13
+100,77
+};
+\addlegendentry{Po usunięciu count}
+\addplot+[mark=square*,orange] table [col sep=comma, x=Label, y=Average] {
+Label,Average
+10,10
+25,9
+50,9
+75,13
+100,42
+};
+\addlegendentry{Po EXPLAIN / STRAIGHT\_JOIN}
+\addplot+[mark=pentagon*,teal] table [col sep=comma, x=Label, y=Average] {
+Label,Average
+10,9
+25,7
+50,8
+75,9
+100,15
+};
+\addlegendentry{Dwie bazy}
+\end{axis}
+\end{tikzpicture}
+\caption{Wykres 100×100 dla wartości do 100, pokazujący realne czasy przed załamaniem krzywej.}
+\end{figure}
+
+\section{Wnioski}
+Testy pokazują, że największą poprawę przyniosła architektura z dwoma bazami oraz separacja odczytów i zapisów. Zmiana zliczania wpłynęła na umiarkowaną redukcję opóźnienia, a analiza EXPLAIN z wymuszeniem kolejności JOIN dała dalsze zauważalne przyspieszenie.
+
+W szczególności:
+\begin{itemize}
+  \item usunięcie dodatkowego zapytania \texttt{COUNT} obniżyło średni czas z 361 ms do 290 ms,
+  \item wymuszenie kolejności JOIN przy użyciu \texttt{STRAIGHT\_JOIN} obniżyło średni czas do 276 ms,
+  \item finalna konfiguracja z dwiema bazami obniżyła średni czas do 186 ms i poprawiła przepustowość odczytów.
+\end{itemize}
+
+Optymalizacja zapytań i architektury bazy danych w tej kolejności okazała się skuteczna: najpierw zmniejszono koszty pojedynczego zapytania, a następnie poprawiono skalowalność na poziomie infrastruktury.
+
+\end{document}

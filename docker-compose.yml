@@ -1,7 +1,9 @@
+﻿version: "3.8"
+
 services:
-  db:
+  db_primary:
     image: mysql:8.0
-    container_name: hair_salon_db
+    container_name: hair_salon_db_primary
     restart: unless-stopped
     environment:
       MYSQL_ROOT_PASSWORD: root
@@ -9,20 +11,46 @@ services:
     ports:
       - "3307:3306"
     volumes:
-      - mysql_data:/var/lib/mysql
+      - mysql_data_primary:/var/lib/mysql
       - ./schema.sql:/docker-entrypoint-initdb.d/schema.sql
-    command: --default-authentication-plugin=mysql_native_password --max_connections=200
-    cpus: 8
-    mem_limit: "512m"
+    command: --default-authentication-plugin=mysql_native_password --max_connections=200 --server-id=1 --log-bin=mysql-bin --binlog-format=ROW
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  db_replica:
+    image: mysql:8.0
+    container_name: hair_salon_db_replica
+    restart: unless-stopped
+    depends_on:
+      - db_primary
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+    ports:
+      - "3308:3306"
+    volumes:
+      - mysql_data_replica:/var/lib/mysql
+    command: --default-authentication-plugin=mysql_native_password --max_connections=200 --server-id=2 --log-bin=mysql-bin --relay-log=mysql-relay-bin --read-only=ON --skip-host-cache --skip-name-resolve
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
 
   app:
     build: .
     container_name: hair_salon_app
     restart: unless-stopped
     depends_on:
-      - db
+      - db_primary
+      - db_replica
     environment:
-      DB_HOST: db
+      DB_WRITE_HOST: db_primary
+      DB_READ_HOST: db_replica
       DB_USER: root
       DB_PASSWORD: root
       DB_NAME: hair_salon_db
@@ -31,4 +59,5 @@ services:
       - "8000:8000"
 
 volumes:
-  mysql_data:
+  mysql_data_primary:
+  mysql_data_replica:

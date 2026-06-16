@@ -4,7 +4,7 @@ from datetime import date, datetime, time, timedelta
 import mysql.connector
 from fastapi import FastAPI, HTTPException, Query, status
 
-from db import get_read_connection, get_write_connection
+from db import get_connection
 from models import BookSlotRequest
 
 app = FastAPI()
@@ -13,8 +13,8 @@ ALLOWED_SLOT_STATUSES = {"available", "booked", "cancelled", "blocked"}
 
 
 @contextmanager
-def connection_cursor(dictionary: bool = False, write: bool = False):
-    conn = get_write_connection() if write else get_read_connection()
+def connection_cursor(dictionary: bool = False):
+    conn = get_connection()
     cursor = conn.cursor(dictionary=dictionary)
     try:
         yield conn, cursor
@@ -83,15 +83,16 @@ def get_slots(
     limit: int = Query(default=30, ge=1, le=200),
 ):
     if date_from and date_to and date_from > date_to:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="date_from nie może być późniejszy niż date_to."
-        )
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="date_from nie może być późniejszy niż date_to.")
 
-    where_clause, parameters = _build_slot_filters(
-        date_from, date_to, salon_id, hairdresser_id, slot_status
-    )
+    where_clause, parameters = _build_slot_filters(date_from, date_to, salon_id, hairdresser_id, slot_status)
     offset = (page - 1) * limit
+
+    count_query = f"""
+        SELECT COUNT(*) AS total
+        FROM time_slot ts
+        WHERE {where_clause}
+    """
 
     data_query = f"""
         SELECT
@@ -105,32 +106,31 @@ def get_slots(
             ts.status,
             ts.created_at
         FROM time_slot ts
-        STRAIGHT_JOIN salon ON salon.salon_id = ts.salon_id
-        STRAIGHT_JOIN hairdresser ON hairdresser.hairdresser_id = ts.hairdresser_id
+        INNER JOIN salon ON salon.salon_id = ts.salon_id
+        INNER JOIN hairdresser ON hairdresser.hairdresser_id = ts.hairdresser_id
         WHERE {where_clause}
         ORDER BY ts.start_time, ts.slot_id
         LIMIT %s OFFSET %s
     """
 
     with connection_cursor(dictionary=True) as (_, cursor):
-        cursor.execute(data_query, parameters + [limit + 1, offset])
-        rows = cursor.fetchall()
+        cursor.execute(count_query, parameters)
+        total = cursor.fetchone()["total"]
 
-    has_next = len(rows) > limit
-    slots = rows[:limit]
+        cursor.execute(data_query, parameters + [limit, offset])
+        slots = cursor.fetchall()
 
     return {
+        "total": total,
         "page": page,
         "limit": limit,
-        "returned": len(slots),
-        "has_next": has_next,
         "slots": slots,
     }
 
 
 @app.post("/slots/book", status_code=status.HTTP_201_CREATED)
 def book_slot(payload: BookSlotRequest):
-    conn = get_write_connection()
+    conn = get_connection()
     cursor = conn.cursor(dictionary=True)
 
     try:

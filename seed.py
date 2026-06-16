@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 from datetime import date, datetime, time, timedelta
 
-from db import get_connection
+from db import get_write_connection
 
 
 SPECIALIZATIONS = [
@@ -68,7 +68,7 @@ def main() -> None:
     args = parse_args()
     start_date = date.fromisoformat(args.start_date)
 
-    conn = get_connection()
+    conn = get_write_connection()
     cursor = conn.cursor()
 
     try:
